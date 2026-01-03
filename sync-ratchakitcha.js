@@ -296,7 +296,7 @@ async function downloadPdfs(yearMonth, metaPath) {
 }
 
 // Download and extract ZIP for a month
-async function downloadAndExtractZip(yearMonth) {
+async function downloadAndExtractZip(yearMonth, metaPath) {
   const [year] = yearMonth.split('-');
   const remotePath = `zip/${year}/${yearMonth}.zip`;
   const zipDir = path.join(CONFIG.outputDir, 'zip', year);
@@ -305,12 +305,43 @@ async function downloadAndExtractZip(yearMonth) {
 
   console.log(`\n📦 Processing ZIP: ${yearMonth}.zip`);
 
-  // Check if already extracted
+  // Check if already extracted and verified
   if (fs.existsSync(pdfDir)) {
     const existingFiles = fs.readdirSync(pdfDir).filter(f => f.endsWith('.pdf'));
     if (existingFiles.length > 0) {
-      console.log(`  ✓ Already extracted (${existingFiles.length} PDFs in ${pdfDir})`);
-      return { status: 'skipped', extracted: existingFiles.length };
+      console.log(`  ✓ Already extracted (${existingFiles.length} PDFs)`);
+
+      // Verify and cleanup leftover ZIP if present
+      let verified = false;
+      if (metaPath && fs.existsSync(metaPath)) {
+        const meta = parseMetaFile(metaPath);
+        const expectedFiles = meta.map(m => m.pdf_file).filter(Boolean);
+        const existingSet = new Set(existingFiles);
+        const missing = expectedFiles.filter(f => !existingSet.has(f));
+
+        if (missing.length === 0) {
+          verified = true;
+
+          // Cleanup leftover ZIP
+          if (fs.existsSync(zipPath)) {
+            const zipSize = fs.statSync(zipPath).size;
+            fs.unlinkSync(zipPath);
+            console.log(`  🗑️  Removed leftover ZIP (freed ${formatBytes(zipSize)})`);
+
+            // Remove empty directories
+            const zipYearDir = path.dirname(zipPath);
+            if (fs.existsSync(zipYearDir) && fs.readdirSync(zipYearDir).length === 0) {
+              fs.rmdirSync(zipYearDir);
+            }
+            const zipBaseDir = path.dirname(zipYearDir);
+            if (fs.existsSync(zipBaseDir) && fs.readdirSync(zipBaseDir).length === 0) {
+              fs.rmdirSync(zipBaseDir);
+            }
+          }
+        }
+      }
+
+      return { status: 'skipped', extracted: existingFiles.length, verified };
     }
   }
 
@@ -386,7 +417,40 @@ async function downloadAndExtractZip(yearMonth) {
   const extractedFiles = fs.readdirSync(pdfDir).filter(f => f.endsWith('.pdf'));
   console.log(`  ✅ Extracted ${extractedFiles.length} PDF files`);
 
-  return { status: 'extracted', extracted: extractedFiles.length };
+  // Verify against meta before cleanup
+  let verified = false;
+  if (metaPath && fs.existsSync(metaPath)) {
+    const meta = parseMetaFile(metaPath);
+    const expectedFiles = meta.map(m => m.pdf_file).filter(Boolean);
+    const extractedSet = new Set(extractedFiles);
+    const missing = expectedFiles.filter(f => !extractedSet.has(f));
+
+    if (missing.length === 0) {
+      verified = true;
+      console.log(`  ✓ Verified: all ${expectedFiles.length} files present`);
+    } else {
+      console.log(`  ⚠️  Verification failed: ${missing.length} files missing`);
+    }
+  }
+
+  // Cleanup ZIP after successful verification
+  if (verified && fs.existsSync(zipPath)) {
+    const zipSize = fs.statSync(zipPath).size;
+    fs.unlinkSync(zipPath);
+    console.log(`  🗑️  Removed ZIP (freed ${formatBytes(zipSize)})`);
+
+    // Remove empty zip directory
+    const zipYearDir = path.dirname(zipPath);
+    if (fs.existsSync(zipYearDir) && fs.readdirSync(zipYearDir).length === 0) {
+      fs.rmdirSync(zipYearDir);
+    }
+    const zipBaseDir = path.dirname(zipYearDir);
+    if (fs.existsSync(zipBaseDir) && fs.readdirSync(zipBaseDir).length === 0) {
+      fs.rmdirSync(zipBaseDir);
+    }
+  }
+
+  return { status: 'extracted', extracted: extractedFiles.length, verified };
 }
 
 // Verify downloads against meta
@@ -568,10 +632,10 @@ async function syncFromZip(months) {
     // Download meta file first
     const metaPath = await downloadMeta(yearMonth);
 
-    // Download and extract ZIP
-    const result = await downloadAndExtractZip(yearMonth);
+    // Download, extract ZIP, verify and cleanup
+    const result = await downloadAndExtractZip(yearMonth, metaPath);
 
-    // Verify against meta
+    // Final verification report
     const verification = verifyDownloads(yearMonth, metaPath);
 
     // Calculate size
