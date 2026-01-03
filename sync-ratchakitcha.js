@@ -7,12 +7,14 @@
  * Usage:
  *   node sync-ratchakitcha.js                    # Download hot PDFs (2025-12, 2026-01)
  *   node sync-ratchakitcha.js 2024-01 2024-02    # Download specific months
+ *   node sync-ratchakitcha.js --zip 2025-11      # Download from ZIP archive
  *   node sync-ratchakitcha.js --verify           # Verify existing downloads
  */
 
 const fs = require('fs');
 const path = require('path');
 const { pipeline } = require('stream/promises');
+const { execSync } = require('child_process');
 
 // Configuration
 const CONFIG = {
@@ -293,6 +295,100 @@ async function downloadPdfs(yearMonth, metaPath) {
   return { downloaded, skipped, failed, files: results };
 }
 
+// Download and extract ZIP for a month
+async function downloadAndExtractZip(yearMonth) {
+  const [year] = yearMonth.split('-');
+  const remotePath = `zip/${year}/${yearMonth}.zip`;
+  const zipDir = path.join(CONFIG.outputDir, 'zip', year);
+  const zipPath = path.join(zipDir, `${yearMonth}.zip`);
+  const pdfDir = path.join(CONFIG.outputDir, `pdf/${year}/${yearMonth}`);
+
+  console.log(`\n📦 Processing ZIP: ${yearMonth}.zip`);
+
+  // Check if already extracted
+  if (fs.existsSync(pdfDir)) {
+    const existingFiles = fs.readdirSync(pdfDir).filter(f => f.endsWith('.pdf'));
+    if (existingFiles.length > 0) {
+      console.log(`  ✓ Already extracted (${existingFiles.length} PDFs in ${pdfDir})`);
+      return { status: 'skipped', extracted: existingFiles.length };
+    }
+  }
+
+  ensureDir(zipDir);
+  ensureDir(pdfDir);
+
+  // Download ZIP if not exists or empty
+  let needsDownload = true;
+  if (fs.existsSync(zipPath)) {
+    const stats = fs.statSync(zipPath);
+    if (stats.size > 0) {
+      console.log(`  ✓ ZIP already downloaded (${formatBytes(stats.size)})`);
+      needsDownload = false;
+    }
+  }
+
+  if (needsDownload) {
+    console.log(`  ⬇️  Downloading ZIP...`);
+    const url = getDownloadUrl(remotePath);
+
+    // Stream download with progress
+    const response = await fetchWithRetry(url);
+    const contentLength = response.headers.get('content-length');
+    const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
+
+    let downloadedBytes = 0;
+    const fileStream = fs.createWriteStream(zipPath);
+
+    // Use a transform to track progress
+    const reader = response.body.getReader();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      fileStream.write(Buffer.from(value));
+      downloadedBytes += value.length;
+
+      if (totalBytes > 0) {
+        const percent = Math.round((downloadedBytes / totalBytes) * 100);
+        process.stdout.write(`\r  ⬇️  Downloading: ${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)} (${percent}%)`);
+      } else {
+        process.stdout.write(`\r  ⬇️  Downloading: ${formatBytes(downloadedBytes)}`);
+      }
+    }
+
+    fileStream.end();
+    await new Promise(resolve => fileStream.on('finish', resolve));
+    console.log(`\n  ✅ Downloaded: ${formatBytes(downloadedBytes)}`);
+  }
+
+  // Extract ZIP
+  console.log(`  📂 Extracting to ${pdfDir}...`);
+
+  try {
+    // Use unzip command (available on macOS/Linux)
+    // -j: junk paths (flatten directory structure)
+    // -o: overwrite without prompting
+    // Pattern matches PDFs inside the month folder
+    execSync(`unzip -j -o "${zipPath}" "${yearMonth}/*.pdf" -d "${pdfDir}"`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      maxBuffer: 10 * 1024 * 1024, // 10MB buffer for output
+    });
+  } catch (error) {
+    // unzip returns exit code 1 for warnings (which we can ignore)
+    // Only fail on actual errors (exit code > 1)
+    if (error.status > 1) {
+      console.error(`  ❌ Extraction failed: ${error.message}`);
+      return { status: 'failed', extracted: 0, error: error.message };
+    }
+  }
+
+  const extractedFiles = fs.readdirSync(pdfDir).filter(f => f.endsWith('.pdf'));
+  console.log(`  ✅ Extracted ${extractedFiles.length} PDF files`);
+
+  return { status: 'extracted', extracted: extractedFiles.length };
+}
+
 // Verify downloads against meta
 function verifyDownloads(yearMonth, metaPath) {
   const [year] = yearMonth.split('-');
@@ -446,6 +542,86 @@ async function verifyOnly(months) {
   }
 }
 
+// Sync from ZIP archives
+async function syncFromZip(months) {
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('  Royal Gazette Thailand (Ratchakitcha) Dataset Sync');
+  console.log('  Repository: open-law-data-thailand/soc-ratchakitcha');
+  console.log('  Mode: ZIP Archive');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log(`\nTarget months: ${months.join(', ')}`);
+  console.log(`Output directory: ${path.resolve(CONFIG.outputDir)}`);
+
+  const summary = {
+    months: [],
+    totalExtracted: 0,
+    totalSkipped: 0,
+    totalFailed: 0,
+    totalSize: 0,
+  };
+
+  for (const yearMonth of months) {
+    console.log(`\n${'─'.repeat(60)}`);
+    console.log(`📅 Processing: ${yearMonth}`);
+    console.log('─'.repeat(60));
+
+    // Download meta file first
+    const metaPath = await downloadMeta(yearMonth);
+
+    // Download and extract ZIP
+    const result = await downloadAndExtractZip(yearMonth);
+
+    // Verify against meta
+    const verification = verifyDownloads(yearMonth, metaPath);
+
+    // Calculate size
+    const size = calculateDownloadSize(yearMonth);
+
+    summary.months.push({
+      month: yearMonth,
+      extracted: result.extracted || 0,
+      status: result.status,
+      total: verification.found,
+      size,
+    });
+
+    if (result.status === 'extracted') {
+      summary.totalExtracted += result.extracted;
+    } else if (result.status === 'skipped') {
+      summary.totalSkipped += result.extracted;
+    } else {
+      summary.totalFailed++;
+    }
+    summary.totalSize += size;
+  }
+
+  // Print summary
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log('  SYNC COMPLETE');
+  console.log('═'.repeat(60));
+
+  console.log('\n📊 Summary by month:');
+  for (const m of summary.months) {
+    console.log(`  ${m.month}: ${m.total} files (${formatBytes(m.size)}) - ${m.status}`);
+  }
+
+  console.log(`\n📈 Totals:`);
+  console.log(`  Files: ${summary.months.reduce((a, m) => a + m.total, 0)}`);
+  console.log(`  Size: ${formatBytes(summary.totalSize)}`);
+
+  // Save summary to file
+  const summaryPath = path.join(CONFIG.outputDir, 'sync-summary.json');
+  ensureDir(CONFIG.outputDir);
+  fs.writeFileSync(summaryPath, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    mode: 'zip',
+    ...summary,
+  }, null, 2));
+  console.log(`\n💾 Summary saved to: ${summaryPath}`);
+
+  return summary;
+}
+
 // CLI
 async function main() {
   const args = process.argv.slice(2);
@@ -455,18 +631,21 @@ async function main() {
 Usage: node sync-ratchakitcha.js [options] [months...]
 
 Options:
+  --zip       Download from ZIP archives (for older months)
   --verify    Verify existing downloads only
   --help      Show this help
 
 Examples:
   node sync-ratchakitcha.js                    # Download hot PDFs (2025-12, 2026-01)
-  node sync-ratchakitcha.js 2024-01 2024-02    # Download specific months
+  node sync-ratchakitcha.js 2024-01 2024-02    # Download specific months from pdf/
+  node sync-ratchakitcha.js --zip 2025-11      # Download from ZIP archive
   node sync-ratchakitcha.js --verify           # Verify existing downloads
 `);
     process.exit(0);
   }
 
   const verifyMode = args.includes('--verify');
+  const zipMode = args.includes('--zip');
   const months = args.filter(a => !a.startsWith('--'));
   const targetMonths = months.length > 0 ? months : CONFIG.defaultMonths;
 
@@ -481,6 +660,8 @@ Examples:
   try {
     if (verifyMode) {
       await verifyOnly(targetMonths);
+    } else if (zipMode) {
+      await syncFromZip(targetMonths);
     } else {
       await sync(targetMonths);
     }
