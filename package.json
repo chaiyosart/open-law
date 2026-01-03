@@ -1,0 +1,23 @@
+{
+  "name": "open-law-thailand-sync",
+  "version": "1.0.0",
+  "description": "Sync tool for Royal Gazette Thailand (Ratchakitcha) dataset from HuggingFace",
+  "main": "sync-ratchakitcha.js",
+  "scripts": {
+    "sync": "node sync-ratchakitcha.js",
+    "verify": "node sync-ratchakitcha.js --verify"
+  },
+  "keywords": [
+    "thailand",
+    "law",
+    "royal-gazette",
+    "ratchakitcha",
+    "huggingface",
+    "dataset"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

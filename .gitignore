@@ -1,0 +1,16 @@
+# Downloads (large PDF files)
+downloads/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Node
+node_modules/
+
+# Claude
+.claude/
